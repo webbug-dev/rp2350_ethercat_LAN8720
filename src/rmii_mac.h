@@ -32,3 +32,7 @@ void     rmii_mac_mdio_write(unsigned phy, unsigned reg, unsigned val);
 uint16_t rmii_mac_phy_bmsr(void);
 int      rmii_mac_phy_addr(void);
 void     rmii_mac_stats(uint32_t *tx, uint32_t *rx);
+
+// Re-arm the RX path (PIO SM + DMA) from a clean state — call before re-scanning
+// after a link glitch so a stuck mid-frame RX does not mangle replies.
+void     rmii_mac_rx_restart(void);

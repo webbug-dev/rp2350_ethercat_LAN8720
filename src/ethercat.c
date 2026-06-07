@@ -611,8 +611,11 @@ static bool bring_up(int pos) {
     g_shared.drive[sl->drive_idx].model[sizeof(g_shared.drive[sl->drive_idx].model) - 1] = '\0';
     SHARED_UNLOCK();
 
-    // (5b) Dump as much standard CoE info as the drive exposes.
-    coe_dump_info(sl);
+    // (5b) Dump standard CoE info — once per drive only, so re-bring-up after a
+    // link glitch is fast (the ~20 SDO reads here take ~1 s and would otherwise
+    // repeat on every rescan while the link is flapping).
+    static bool s_info_done[EC_DRIVE_COUNT] = { false };
+    if (!s_info_done[sl->drive_idx]) { s_info_done[sl->drive_idx] = true; coe_dump_info(sl); }
 
     // (6) PDO mapping + process-data SyncManagers + FMMUs.
     coe_map_csp(sl);
@@ -636,19 +639,26 @@ static bool bring_up(int pos) {
 static int s_npos;               // slave positions present on the bus
 
 static bool scan_and_bringup(void) {
-    LOGW("[EC] link %s (%d Mbit) — scanning segment\n",
-        rmii_mac_link_up() ? "UP" : "DOWN", rmii_mac_link_speed());
+    rmii_mac_rx_restart();      // clean RX after any link glitch before scanning
 
     uint8_t st[2] = {0,0};
-    s_dbg = true;                                  // trace this BRD fully
+    static bool first_scan = true;
+    s_dbg = first_scan;                            // verbose-trace only the 1st BRD
     int n = (int)ec_cmd(EC_BRD, 0x0000, REG_AL_STATUS, st, 2);
     s_dbg = false;
-    LOGW("[EC] === segment scan: BRD WKC=%d (slaves answering), AL=0x%02X ===\n", n, st[0]);
 
     if (n <= 0) {
+        // No slaves: rate-limit the log so a flapping link doesn't flood USB-CDC.
+        static uint32_t last = 0; uint32_t now = now_ms();
+        if (first_scan || now - last >= 3000) { last = now;
+            LOGW("[EC] segment scan: no slaves answering (link %s)\n",
+                 rmii_mac_link_up() ? "up" : "down"); }
         for (int d = 0; d < EC_DRIVE_COUNT; d++) set_phase(d, DS_SCAN, "Searching...");
+        first_scan = false;
         return false;
     }
+    first_scan = false;
+    LOGW("[EC] === segment scan: BRD WKC=%d (slaves answering), AL=0x%02X ===\n", n, st[0]);
     if (n > EC_DRIVE_COUNT) { LOGW("[EC] %d slaves seen, only %d supported\n", n, EC_DRIVE_COUNT); n = EC_DRIVE_COUNT; }
     s_npos = n;
 

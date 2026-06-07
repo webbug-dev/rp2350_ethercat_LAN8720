@@ -72,7 +72,8 @@ static void boot_task(void *arg) {
                         (cr & 0xFFFFu) == CRASH_MALLOC    ? "MALLOC FAILED" : "?";
         LOG("[BOOT] *** previous run crashed: %s — auto-rebooted ***\n", r);
         if ((cr & 0xFFFFu) == CRASH_HARDFAULT)
-            LOG("[BOOT]     fault PC = 0x%08lX\n", (unsigned long)watchdog_hw->scratch[1]);
+            LOG("[BOOT]     fault PC=0x%08lX  LR=0x%08lX (addr2line the LR)\n",
+                (unsigned long)watchdog_hw->scratch[1], (unsigned long)watchdog_hw->scratch[2]);
     } else if (watchdog_caused_reboot()) {
         LOG("[BOOT] *** previous run LOCKED UP (hardware watchdog reset) ***\n");
     }
@@ -125,7 +126,7 @@ void vApplicationStackOverflowHook(TaskHandle_t task, char *name) {
 // Override the SDK's hard-fault handler: capture the faulting PC (from the
 // stacked exception frame) into scratch[1], record the cause, and reboot. The
 // next boot prints the PC so it can be mapped to a function with addr2line.
-static volatile uint32_t g_fault_pc;
+static volatile uint32_t g_fault_pc, g_fault_lr;
 void hardfault_finish(void);
 
 void __attribute__((naked)) isr_hardfault(void) {
@@ -135,14 +136,18 @@ void __attribute__((naked)) isr_hardfault(void) {
         "mrseq r0, msp         \n"
         "mrsne r0, psp         \n"
         "ldr r1, [r0, #24]     \n"   // stacked PC = frame[6]
+        "ldr r3, [r0, #20]     \n"   // stacked LR = frame[5] (the caller)
         "ldr r2, =g_fault_pc   \n"
         "str r1, [r2]          \n"
+        "ldr r2, =g_fault_lr   \n"
+        "str r3, [r2]          \n"
         "b hardfault_finish    \n"
     );
 }
 
 void hardfault_finish(void) {
     watchdog_hw->scratch[1] = g_fault_pc;
+    watchdog_hw->scratch[2] = g_fault_lr;
     watchdog_hw->scratch[0] = CRASH_MAGIC | CRASH_HARDFAULT;
     watchdog_reboot(0, 0, 0);
     for (;;) {}

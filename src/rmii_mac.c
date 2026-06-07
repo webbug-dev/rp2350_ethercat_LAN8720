@@ -16,6 +16,9 @@
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "hardware/pio.h"
+#include "hardware/resets.h"
+#include "hardware/sync.h"
 
 #include "pico/stdlib.h"
 #include "pico/time.h"
@@ -76,6 +79,7 @@ static volatile int s_rx_w = 0;                // buffer the DMA is filling (ISR
 static int      s_rx_r = 0;                    // next buffer recv() reads
 static int      s_rx_dma;
 static volatile uint32_t s_rx_frames, s_rx_isr;
+static uint     s_rx_off, s_tx_off;     // PIO program offsets (for restart)
 
 static void __not_in_flash_func(rmii_rx_isr)(void) {
     if (!(PIO_DEV->ints0 & (PIO_IRQ0_INTS_SM0_BITS << SM_RX))) return;
@@ -113,6 +117,25 @@ int rmii_mac_recv(uint8_t *buf, size_t cap) {
 void rmii_mac_stats(uint32_t *tx, uint32_t *rx) {
     if (tx) *tx = s_tx_frames;
     if (rx) *rx = s_rx_frames;
+}
+
+// Re-arm the RX path from a clean slate. After a link glitch the RX SM can be
+// left waiting mid-frame and the DMA mid-write, so subsequent frames are mangled
+// (replies come back with WKC=0). Call this before re-scanning the segment.
+void rmii_mac_rx_restart(void) {
+    uint32_t save = save_and_disable_interrupts();   // the eof ISR touches these
+    pio_sm_set_enabled(PIO_DEV, SM_RX, false);
+    dma_channel_abort(s_rx_dma);
+    pio_sm_clear_fifos(PIO_DEV, SM_RX);
+    pio_sm_restart(PIO_DEV, SM_RX);
+    pio_interrupt_clear(PIO_DEV, SM_RX);
+    for (int i = 0; i < RX_NBUF; i++) s_rxlen[i] = 0;
+    s_rx_w = 0; s_rx_r = 0;
+    dma_channel_set_write_addr(s_rx_dma, s_rxbuf[0], false);
+    dma_channel_set_trans_count(s_rx_dma, RX_BUFSZ, true);
+    pio_sm_exec(PIO_DEV, SM_RX, pio_encode_jmp(s_rx_off));
+    pio_sm_set_enabled(PIO_DEV, SM_RX, true);
+    restore_interrupts(save);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -195,7 +218,7 @@ static void link_poll(void) {
     bool was = s_link;
     s_link = (bs & LAN8720A_BASIC_STATUS_REG_LINK_STATUS) != 0;
     s_speed = s_link ? 100 : 0;
-    NET_DBG("[MAC] PHY@%d BMSR=0x%04X link=%d\n", s_phy, bs, s_link);
+    // Only log on a change — a per-poll line every 200 ms floods USB-CDC.
     if (s_link != was) LOGW("[MAC] *** LINK %s *** (BMSR=0x%04X)\n", s_link ? "UP" : "DOWN", bs);
 }
 bool rmii_mac_link_up(void) {
@@ -217,6 +240,13 @@ bool rmii_mac_init(const uint8_t mac[6]) {
          PICO_RMII_ETHERNET_RX_PIN, PICO_RMII_ETHERNET_RX_PIN+1, PICO_RMII_ETHERNET_RX_PIN+2,
          PICO_RMII_ETHERNET_MDIO_PIN, PICO_RMII_ETHERNET_MDC_PIN, PICO_RMII_ETHERNET_RETCLK_PIN,
          (unsigned long)clock_get_hz(clk_sys));
+
+    // Soft-restart safety: fully reset the PIO0 and DMA hardware blocks before we
+    // touch them, so any state machine / DMA still running from a previous boot
+    // (e.g. after a watchdog reset, when peripherals aren't power-cycled) is
+    // killed — otherwise leftover transfers corrupt the fresh setup.
+    reset_block(RESETS_RESET_PIO0_BITS | RESETS_RESET_DMA_BITS);
+    unreset_block_wait(RESETS_RESET_PIO0_BITS | RESETS_RESET_DMA_BITS);
 
     // REF_CLK input from the module.
     gpio_init(PICO_RMII_ETHERNET_RETCLK_PIN);
@@ -253,8 +283,8 @@ bool rmii_mac_init(const uint8_t mac[6]) {
          rmii_mac_mdio_read(s_phy, 0), rmii_mac_mdio_read(s_phy, 4));
 
     // ── PIO programs ──
-    uint rx_off = pio_add_program(PIO_DEV, &lan8720_rx_program);
-    uint tx_off = pio_add_program(PIO_DEV, &lan8720_tx_program);
+    s_rx_off = pio_add_program(PIO_DEV, &lan8720_rx_program);
+    s_tx_off = pio_add_program(PIO_DEV, &lan8720_tx_program);
 
     // ── RX DMA: PIO RX FIFO (high byte) → current rx buffer ──
     s_rx_dma = dma_claim_unused_channel(true);
@@ -284,13 +314,13 @@ bool rmii_mac_init(const uint8_t mac[6]) {
     s_txbuf[7] = 0xD5;
 
     // ── Start the state machines ──
-    lan8720_tx_init(PIO_DEV, SM_TX, tx_off, PICO_RMII_ETHERNET_TX_PIN);
+    lan8720_tx_init(PIO_DEV, SM_TX, s_tx_off, PICO_RMII_ETHERNET_TX_PIN);
 
     irq_set_exclusive_handler(PIO0_IRQ_0, rmii_rx_isr);
     pio_set_irq0_source_enabled(PIO_DEV, pis_interrupt0, true);
     irq_set_enabled(PIO0_IRQ_0, true);
 
-    lan8720_rx_init(PIO_DEV, SM_RX, rx_off, PICO_RMII_ETHERNET_RX_PIN);
+    lan8720_rx_init(PIO_DEV, SM_RX, s_rx_off, PICO_RMII_ETHERNET_RX_PIN);
 
     LOGW("[MAC] PIO RMII MAC up (edge-synced to REF_CLK, clkdiv=1)\n");
     return true;
