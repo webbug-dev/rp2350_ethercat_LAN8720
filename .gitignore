@@ -1,0 +1,22 @@
+# Vendored dependencies — keep the folder, ignore its contents (fetched by cmake)
+/extern/*
+!/extern/.gitkeep
+
+# CMake build tree — keep the folder, ignore its contents
+/build/*
+!/build/.gitkeep
+
+# Datasheets / ESI files — not tracked at all
+/doc/
+
+# The release UF2 lives in /firmware (tracked); ignore stray ones elsewhere
+/*.uf2
+/src/*.uf2
+
+# Editor / OS cruft
+*.swp
+*~
+.cache/
+.vscode/
+compile_commands.json
+.DS_Store

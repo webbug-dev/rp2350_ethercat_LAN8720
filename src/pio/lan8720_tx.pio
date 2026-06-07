@@ -1,0 +1,57 @@
+/*
+ * RMII transmit PIO — edge-synchronised to the module's REF_CLK.
+ *
+ * Based on messani/pico-lan8720. Unlike the free-running NCE external-clock TX
+ * (which the PHY rejected because its phase drifted relative to the module's
+ * independent 50 MHz REF_CLK), this drives each di-bit on a fresh REF_CLK (GP22)
+ * edge, so TXD/TX_EN stay aligned to what the PHY samples. clkdiv=1 (sys=250 MHz).
+ *
+ * The frame fed via the TX FIFO already contains preamble + SFD + payload + FCS
+ * (built in software, see rmii_mac.c). side-set drives TX_EN.
+ */
+
+.define PICO_RMII_ETHERNET_RETCLK_PIN 22          ; REF_CLK input (must match lan8720_rx.pio)
+
+.program lan8720_tx
+.side_set 1                                       ; TX_EN
+
+; pin+0: TX0   pin+1: TX1   pin+2: TX_EN (side-set)
+.wrap_target
+idle:
+    jmp !osre inittx    side 0x00                 ; data waiting? start transmit
+    jmp idle            side 0x00                 ; else keep TX_EN low
+
+inittx:
+    wait 1 gpio PICO_RMII_ETHERNET_RETCLK_PIN  side 0x00    ; align to one REF_CLK cycle
+    wait 0 gpio PICO_RMII_ETHERNET_RETCLK_PIN  side 0x00
+
+sendloop:
+    out pins, 2         side 0x01                 ; drive di-bit, TX_EN high
+    wait 1 gpio PICO_RMII_ETHERNET_RETCLK_PIN  side 0x01    ; clock HI
+    wait 0 gpio PICO_RMII_ETHERNET_RETCLK_PIN  side 0x01    ; clock LO
+    jmp !osre sendloop  side 0x01                 ; more data? loop
+    set pins, 0         side 0x00                 ; end of frame, TX_EN low
+.wrap
+
+% c-sdk {
+
+static inline void lan8720_tx_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 3, true);
+
+    pio_sm_config c = lan8720_tx_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, pin, 2);
+
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, pin + 1);
+    pio_gpio_init(pio, pin + 2);
+
+    sm_config_set_out_shift(&c, true, true, 8);    // shift right, autopull, 8 bits
+    sm_config_set_set_pins(&c, pin, 2);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    sm_config_set_sideset_pins(&c, pin + 2);       // TX_EN
+    sm_config_set_clkdiv(&c, 1);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

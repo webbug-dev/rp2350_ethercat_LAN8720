@@ -1,0 +1,66 @@
+/*
+ * RMII receive PIO — edge-synchronised to the module's REF_CLK.
+ *
+ * Based on messani/pico-lan8720 (which solved 100 Mbit on an unmodified module
+ * by re-syncing to REF_CLK on every di-bit instead of free-running). Runs at the
+ * full system clock (clkdiv=1, sys=250 MHz) and waits on REF_CLK (GP22) edges, so
+ * it is immune to the phase drift that broke the free-running TX.
+ *
+ * The PIO assembler needs the pin numbers, so they live here. GP defines below
+ * are the authoritative copy; board.h mirrors them for documentation.
+ */
+
+// ── RP2350 GPIO assignments (RMII bus) ──────────────────────────────────────
+.define public PICO_RMII_ETHERNET_SM_RX       0
+.define public PICO_RMII_ETHERNET_SM_TX       1
+.define public PICO_RMII_ETHERNET_RX_PIN      6   // RX0=6, RX1=7, CRS_DV=8 (consecutive)
+.define public PICO_RMII_ETHERNET_TX_PIN     10   // TX0=10, TX1=11, TX_EN=12 (consecutive)
+.define public PICO_RMII_ETHERNET_MDIO_PIN   14
+.define public PICO_RMII_ETHERNET_MDC_PIN    15
+.define public PICO_RMII_ETHERNET_RETCLK_PIN 22   // REF_CLK INPUT (50 MHz from module)
+
+.program lan8720_rx
+; pin+0: RX0   pin+1: RX1   pin+2: CRS_DV
+.wrap_target
+    wait 0 pin 2                                  ; wait while CRS_DV/RX idle
+    wait 0 pin 0
+    wait 0 pin 1
+
+    wait 1 pin 2                                  ; detect preamble
+    wait 1 pin 0
+
+    wait 1 pin 1                                  ; detect start-of-frame delimiter
+
+    wait 0 gpio PICO_RMII_ETHERNET_RETCLK_PIN     ; align to one REF_CLK cycle
+    wait 1 gpio PICO_RMII_ETHERNET_RETCLK_PIN
+
+recvloop:
+    wait 0 gpio PICO_RMII_ETHERNET_RETCLK_PIN     ; wait clock LO
+    wait 1 gpio PICO_RMII_ETHERNET_RETCLK_PIN     ; wait clock HI
+    in pins, 2                                    ; sample di-bit
+    jmp pin recvloop                              ; while CRS_DV asserted
+
+    irq wait 0 rel                                ; signal end-of-frame to the CPU
+.wrap
+
+% c-sdk {
+
+static inline void lan8720_rx_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 3, false);
+
+    pio_sm_config c = lan8720_rx_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin);
+
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, pin + 1);
+    pio_gpio_init(pio, pin + 2);
+
+    sm_config_set_in_shift(&c, true, true, 8);    // shift right, autopush, 8 bits
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&c, pin + 2);           // CRS_DV
+    sm_config_set_clkdiv(&c, 1);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
