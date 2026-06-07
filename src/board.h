@@ -47,10 +47,10 @@
 //                     0 = leave it at the SDK default — try this if you suspect
 //                         heat/stability issues and want to test a lower voltage.
 //   CORE_VREG_VOLTAGE the VREG_VOLTAGE_* level to apply when the boost is on.
-//                     1_15/1_20 are usually plenty for 250 MHz; 1_30 is the SDK
-//                     maximum and is what this build ships with.
+//                     1_20 is a comfortable margin for 250 MHz; raise toward
+//                     1_30 (the SDK maximum) only if you see instability.
 #define CORE_VREG_BOOST    1
-#define CORE_VREG_VOLTAGE  VREG_VOLTAGE_1_30   // SDK max (VREG_VOLTAGE_MAX)
+#define CORE_VREG_VOLTAGE  VREG_VOLTAGE_1_20
 
 // ── RMII pin reference (authoritative copy is the .pio — keep in sync) ───────
 #define RMII_TX0_PIN     10   // TX0, TX1, TXEN are consecutive (10,11,12)
