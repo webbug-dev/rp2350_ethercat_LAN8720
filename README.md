@@ -188,6 +188,47 @@ For an autonomous bench test (no buttons), set `EC_AUTORUN` in `src/board.h`.
 
 ---
 
+## Known issues
+
+### Ethernet link flapping (physical)
+
+On a bench setup the LAN8720 **link can drop and re-establish every few seconds**
+— the boot/serial log shows it directly:
+
+```
+[MAC] *** LINK DOWN *** (BMSR=0x0081)
+[MAC] *** LINK UP *** (BMSR=0x780D)
+```
+
+When the link drops the drive falls off the bus and the master re-discovers it
+(`reached OP` reappears), but while it is flapping the cyclic data can't run
+continuously. This is a **physical-layer** problem, not firmware: a bare LAN8720
+module on jumper wires has none of the integrated magnetics / shielding of a
+W5500-class part, and a running stepper is a strong EMI source. The firmware
+already recovers cleanly — it re-arms the RX path and re-discovers the drive on
+every glitch — but to make the link *stable* you have to fix the wiring:
+
+- Test first with the **motor not moving** to confirm the flapping is EMI from
+  the drive (if it's stable when idle and flaps when running, it's EMI).
+- Keep the RMII/MDI runs short; seat the RJ45 and the module firmly.
+- Give the module a solid common **ground** and, if possible, a shielded cable /
+  a ferrite on the Ethernet lead; keep it away from the motor power leads.
+
+### Intermittent hard fault
+
+A rare hard fault (jump to `PC=0x00000000`) can crash the firmware; the watchdog
+auto-recovers and the **next boot prints the fault address**:
+
+```
+[BOOT] *** previous run crashed: HARD FAULT — auto-rebooted ***
+[BOOT]     fault PC=0x........  LR=0x........ (addr2line the LR)
+```
+
+If you hit it, run `arm-none-eabi-addr2line -e build/rp2350_lan8720.elf <LR>` to
+locate the caller and open an issue with that line.
+
+---
+
 ## Layout
 
 ```
